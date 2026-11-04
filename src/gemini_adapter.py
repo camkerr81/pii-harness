@@ -1,5 +1,6 @@
-"""Native Gemini API (``/v1beta/models/{model}:generateContent``) support, as used by the ``agy`` CLI
-when ``GOOGLE_GEMINI_BASE_URL`` points at pii-harness."""
+"""Native Gemini API support for the ``agy`` CLI: ``/v1beta/models/{model}:generateContent`` (API-key mode,
+``GOOGLE_GEMINI_BASE_URL``) and the Code Assist ``/v1internal:{method}`` backend (Google-account sign-in,
+``CLOUD_CODE_URL``), whose bodies wrap the same payloads in ``{"request": ...}`` and ``{"response": ...}``."""
 
 import copy
 import json
@@ -17,21 +18,28 @@ METHODS = {"generateContent", "streamGenerateContent", "countTokens"}
 API_VERSIONS = {"v1", "v1beta", "v1alpha"}
 # Forwarded untouched, so whatever credential the client presents is what Google sees.
 FORWARD_HEADERS = ("authorization", "x-goog-api-key", "x-goog-user-project", "x-goog-api-client")
+# Code Assist methods answered locally instead of forwarded: agy uploads the whole conversation
+# ("trajectory": prompts, tool output, replies) in plaintext as analytics.
+CODE_ASSIST_DROPPED = {"recordTrajectoryAnalytics"}
 
 # The REST API accepts both proto field spellings.
 _FUNCTION_CALL = ("functionCall", "function_call")
 _FUNCTION_RESPONSE = ("functionResponse", "function_response")
 
 
-def forward_headers(request: Request) -> dict[str, str]:
+def forward_headers(request: Request, *extra: str) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    for name in FORWARD_HEADERS:
+    for name in FORWARD_HEADERS + extra:
         if value := request.headers.get(name):
             headers[name] = value
     return headers
 
 
 def session_seed(payload: dict[str, Any]) -> Any:
+    if isinstance(payload.get("request"), dict):  # Code Assist envelope
+        payload = payload["request"]
+    if payload.get("sessionId"):
+        return payload["sessionId"]
     system = payload.get("systemInstruction") or payload.get("system_instruction")
     if system:
         return system
@@ -62,7 +70,7 @@ def sanitize_request(sanitizer: Sanitizer, session_id: str, payload: dict[str, A
             sanitized[key] = _sanitize_content(sanitizer, session_id, payload[key])
     if isinstance(payload.get("contents"), list):
         sanitized["contents"] = [_sanitize_content(sanitizer, session_id, c) for c in payload["contents"]]
-    for key in ("generateContentRequest", "generate_content_request"):  # countTokens
+    for key in ("request", "generateContentRequest", "generate_content_request"):  # Code Assist envelope, countTokens
         if isinstance(payload.get(key), dict):
             sanitized[key] = sanitize_request(sanitizer, session_id, payload[key])
     return sanitized
@@ -75,8 +83,10 @@ def hydrate_response(vault: PIIVault, session_id: str, body: Any) -> Any:
     tail = hydrator.finish()
     if isinstance(body, list):
         return events + [tail] if tail else events
-    for leftover in (tail or {}).get("candidates", []):  # a candidate without finishReason
-        candidate = next(c for c in body["candidates"] if c.get("index", 0) == leftover["index"])
+    tail = (tail or {}).get("response", tail) or {}
+    target = body["response"] if isinstance(body.get("response"), dict) else body
+    for leftover in tail.get("candidates", []):  # a candidate without finishReason
+        candidate = next(c for c in target["candidates"] if c.get("index", 0) == leftover["index"])
         candidate["content"]["parts"] += leftover["content"]["parts"]
     return body
 

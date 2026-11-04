@@ -201,6 +201,42 @@ def create_app(settings: Settings | None = None, http_client: httpx.AsyncClient 
             GeminiStreamHydrator(vault, session_id) if sse else None,
         )
 
+    # --- Code Assist backend (agy signed in with a Google account, CLOUD_CODE_URL) ---------------
+
+    @app.post("/v1internal:{method}")
+    async def code_assist(method: str, request: Request) -> Response:
+        if method in gemini_adapter.CODE_ASSIST_DROPPED:
+            return JSONResponse({})
+        if settings.MOCK_UPSTREAM:
+            message = "MOCK_UPSTREAM does not emulate the Code Assist backend; use API-key mode to test offline."
+            return JSONResponse({"error": {"code": 501, "message": message, "status": "UNIMPLEMENTED"}}, status_code=501)
+        payload = await read_json_object(request)
+        if isinstance(payload, Response):
+            return payload
+        vault: PIIVault = request.app.state.vault
+        sanitizer: Sanitizer = request.app.state.sanitizer
+        session_id = derive_session_id(request, gemini_adapter.session_seed(payload))
+        generate = method in gemini_adapter.METHODS
+        # Generate calls are scrubbed field by field; any other method is scrubbed as a whole, which leaves
+        # today's control-plane bodies (project IDs, client metadata) unchanged but covers new methods.
+        if generate:
+            sanitized = await run_in_threadpool(gemini_adapter.sanitize_request, sanitizer, session_id, payload)
+        else:
+            sanitized = await run_in_threadpool(sanitizer.sanitize_json_value, session_id, payload)
+        sse = method == "streamGenerateContent" and request.query_params.get("alt") == "sse"
+        url = f"{settings.UPSTREAM_CODE_ASSIST_URL.rstrip('/')}/v1internal:{method}"
+        if request.url.query:
+            url += "?" + request.url.query
+        return await forward(
+            request,
+            url,
+            sanitized,
+            gemini_adapter.forward_headers(request, "user-agent"),
+            session_id,
+            (lambda body: gemini_adapter.hydrate_response(vault, session_id, body)) if generate else (lambda body: body),
+            GeminiStreamHydrator(vault, session_id) if sse else None,
+        )
+
     return app
 
 

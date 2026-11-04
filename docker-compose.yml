@@ -13,6 +13,7 @@ services:
       - UPSTREAM_OPENAI_URL=${UPSTREAM_OPENAI_URL:-${UPSTREAM_BASE_URL:-https://api.openai.com/v1}}
       - UPSTREAM_API_KEY=${UPSTREAM_API_KEY:-}
       - UPSTREAM_GEMINI_URL=${UPSTREAM_GEMINI_URL:-https://generativelanguage.googleapis.com}
+      - UPSTREAM_CODE_ASSIST_URL=${UPSTREAM_CODE_ASSIST_URL:-https://daily-cloudcode-pa.googleapis.com}
       - VAULT_HMAC_SECRET=${VAULT_HMAC_SECRET:-change-me-in-prod-hmac-key}
       - CUSTOM_REDACT_TERMS=${CUSTOM_REDACT_TERMS:-}
       - VAULT_FALLBACK_SESSION=${VAULT_FALLBACK_SESSION:-}

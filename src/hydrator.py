@@ -150,6 +150,7 @@ class GeminiStreamHydrator:
         self.vault = vault
         self.session_id = session_id
         self._text: dict[tuple[int, bool], StreamHydrator] = {}
+        self._enveloped = False  # Code Assist wraps each event as {"response": {...}}
 
     def _flush(self, index: int, keep: tuple[int, bool] | None = None) -> list[dict[str, Any]]:
         parts = []
@@ -159,7 +160,8 @@ class GeminiStreamHydrator:
         return parts
 
     def process_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        for candidate in event.get("candidates") or []:
+        self._enveloped = isinstance(event.get("response"), dict)
+        for candidate in (event["response"] if self._enveloped else event).get("candidates") or []:
             index = candidate.get("index", 0)
             content = candidate.get("content")
             if isinstance(content, dict) and isinstance(content.get("parts"), list):
@@ -189,7 +191,9 @@ class GeminiStreamHydrator:
         for index in sorted({k[0] for k in self._text}):
             if parts := self._flush(index):
                 candidates.append({"index": index, "content": {"role": "model", "parts": parts}})
-        return {"candidates": candidates} if candidates else None
+        if not candidates:
+            return None
+        return {"response": {"candidates": candidates}} if self._enveloped else {"candidates": candidates}
 
 
 def _sse(data: str) -> bytes:

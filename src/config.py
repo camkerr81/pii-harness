@@ -9,6 +9,8 @@ DEFAULT_HMAC_SECRET = "change-me-in-prod-hmac-key"
 class Settings(BaseModel):
     UPSTREAM_OPENAI_URL: str = "https://api.openai.com/v1"
     UPSTREAM_GEMINI_URL: str = "https://generativelanguage.googleapis.com"
+    # agy's default Code Assist backend when signed in with a Google account (CLOUD_CODE_URL).
+    UPSTREAM_CODE_ASSIST_URL: str = "https://daily-cloudcode-pa.googleapis.com"
     UPSTREAM_API_KEY: str = ""
     VAULT_HMAC_SECRET: str = DEFAULT_HMAC_SECRET
     DB_PATH: str = "/data/vault.db"

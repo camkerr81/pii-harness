@@ -1,6 +1,6 @@
 # pii-harness
 
-A local, zero-trust proxy that sits between your AI agents or tools and an LLM API: OpenAI-compatible chat completions or Google's native Gemini API (as used by the Antigravity `agy` CLI). It removes personal data (names, schools, emails, phone numbers), credentials, and infrastructure IPs from everything you send to the model, and puts the real values back into what the model returns.
+A local, zero-trust proxy that sits between your AI agents or tools and an LLM API: OpenAI-compatible chat completions, Google's native Gemini API, or the Code Assist backend the Antigravity `agy` CLI uses when signed in with a Google account. It removes personal data (names, schools, emails, phone numbers), credentials, and infrastructure IPs from everything you send to the model, and puts the real values back into what the model returns.
 
 ```text
  agent / tool                 pii-harness (local)                    frontier LLM
@@ -24,7 +24,7 @@ The model only ever sees readable placeholders such as `<<PERSON_01>>`, `<<SCHOO
 - **Local NER for names and schools.** A bundled [GLiNER](https://github.com/urchade/GLiNER) model finds people, schools, and any other entity types you configure. It runs on CPU inside the container with the model baked into the image, so no text leaves the machine for detection.
 - **Session isolation.** Tokens are numbered per session and only resolve within the session that created them.
 - **Persistent vault.** SQLite in WAL mode with HMAC-SHA256 lookup keys, stored on a mounted volume.
-- **Native Gemini API.** Serves `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`, so the `agy` CLI can be pointed at it with `GOOGLE_GEMINI_BASE_URL`. Tool output (`functionResponse`) is tokenised before it reaches Google, and `functionCall` arguments are hydrated before `agy` runs them.
+- **Native Gemini API and Code Assist.** Serves `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens` (`agy` with an API key) and `/v1internal:{method}` (`agy` signed in with a Google account). Tool output (`functionResponse`) is tokenised before it reaches Google, and `functionCall` arguments are hydrated before `agy` runs them.
 - **Bridge endpoints.** `POST /v1/sanitize` and `POST /v1/hydrate` let a wrapper script tokenise and restore plain text directly.
 - **Custom terms.** `CUSTOM_REDACT_TERMS` redacts your own hostnames, domains, project names, or people as `<<CUSTOM_NN>>`.
 - **Offline mock mode.** A built-in fake upstream for trying the proxy without an API key.
@@ -79,6 +79,7 @@ Set these in `.env` (read by Docker Compose) or as environment variables.
 | `UPSTREAM_OPENAI_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL. Requests go to `{UPSTREAM_OPENAI_URL}/chat/completions`. The old name `UPSTREAM_BASE_URL` is still read if this is unset. |
 | `UPSTREAM_API_KEY` | _(empty)_ | OpenAI route only. If set, the proxy uses this key upstream. If empty, it forwards each client's own `Authorization: Bearer …` header. |
 | `UPSTREAM_GEMINI_URL` | `https://generativelanguage.googleapis.com` | Gemini API host. Requests keep their path and query, e.g. `{UPSTREAM_GEMINI_URL}/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse`. |
+| `UPSTREAM_CODE_ASSIST_URL` | `https://daily-cloudcode-pa.googleapis.com` | Code Assist backend for `/v1internal:{method}` requests. This is the host `agy` 1.5.0 uses by default; gemini-cli uses `https://cloudcode-pa.googleapis.com`. |
 | `CUSTOM_REDACT_TERMS` | _(empty)_ | Comma-separated terms always replaced with `<<CUSTOM_NN>>`. |
 | `VAULT_FALLBACK_SESSION` | _(empty)_ | If set (e.g. `global`), tokens a session doesn't know are looked up in this session too. Lets a bridge script create tokens once with `/v1/sanitize` in `global` and have them hydrate everywhere. |
 | `VAULT_HMAC_SECRET` | `change-me-in-prod-hmac-key` | Secret for the HMAC-SHA256 vault keys. **Change it.** The proxy logs a warning while the default is in use. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
@@ -131,7 +132,21 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Antigravity CLI (`agy`)
 
-`agy` sends its traffic through the proxy when it uses a Gemini API key, the documented bring-your-own-key mode:
+`agy` can go through the proxy in both of its sign-in modes.
+
+**Signed in with a Google account** (for example Google AI Pro). Set `CLOUD_CODE_URL`; `agy` then sends its Code Assist (`/v1internal:…`) requests to the proxy:
+
+```bash
+CLOUD_CODE_URL=http://localhost:8000 agy
+```
+
+Generate and token-count calls are scrubbed and hydrated like the Gemini API; their bodies just wrap the Gemini request and response in `{"request": …}` / `{"response": …}`. `recordTrajectoryAnalytics`, which uploads the whole conversation in plaintext, is answered locally and never forwarded. Every other method (`loadCodeAssist`, `fetchAvailableModels`, quota checks, …) is forwarded after a whole-body scrub, which leaves today's ID-only bodies unchanged. Your OAuth `Authorization` header and `User-Agent` are passed through as-is.
+
+Verified with `agy` 1.5.0 on a Google AI Pro account: tool calls ran locally with the real values, and none of the forwarded requests contained them. (`CODE_ASSIST_ENDPOINT` is gemini-cli's variable; `agy` ignores it.) A few connections bypass `CLOUD_CODE_URL` and go straight to Google: `www.googleapis.com` (account info), `aicode.googleapis.com`, and `play.googleapis.com` (telemetry). What `aicode` and the telemetry contain was not inspected; `agy` keeps working when both are blocked.
+
+This mode is not a documented integration. Routing a subscription through a proxy that rewrites requests is close to the third-party-client use that Google has suspended Antigravity accounts for, so weigh that risk for your account.
+
+**With a Gemini API key**, the documented bring-your-own-key mode:
 
 ```bash
 export GEMINI_API_KEY=AIza...                         # your Gemini API key (forwarded to Google untouched)
@@ -141,7 +156,7 @@ agy --settings '{"modelProvider":"gemini"}'
 
 To make it permanent, put `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` or add a shell alias. Verified with `agy` 1.5.0: the conversation-title request, the main agent requests, and command output sent back as `functionResponse` all reach Google tokenised, while the commands `agy` runs locally use the real values.
 
-`agy` reads `GOOGLE_GEMINI_BASE_URL` only in API-key mode. When it is signed in with a Google account (for example a Google AI Pro subscription), it talks to Google's own Antigravity backend and does not go through the proxy. The Antigravity desktop app and IDE extension cannot be pointed at a custom endpoint either.
+`agy` reads `GOOGLE_GEMINI_BASE_URL` only in API-key mode. The Antigravity desktop app and IDE extension cannot be pointed at a custom endpoint.
 
 The Gemini route forwards the client's `Authorization`, `x-goog-api-key`, `x-goog-user-project`, and `x-goog-api-client` headers and the query string (`?alt=sse`, `?key=…`) unchanged; other headers are dropped. It refuses other Gemini methods (`embedContent`, …) with a 404 rather than forwarding them unscrubbed.
 
@@ -176,6 +191,7 @@ The proxy does not run tools itself. Your client does, as usual:
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions, with `stream: true` (SSE) or `stream: false`. Upstream error responses are passed through with their original status code. |
 | `POST /{v1,v1beta,v1alpha}/models/{model}:{generateContent,streamGenerateContent,countTokens}` | Native Gemini API, streamed (`?alt=sse` or JSON array) or not. Upstream errors pass through unchanged. |
+| `POST /v1internal:{method}` | Code Assist backend (`agy` signed in with a Google account). See [Antigravity CLI](#antigravity-cli-agy). `MOCK_UPSTREAM` does not emulate it. |
 | `POST /v1/sanitize` | `{"session_id", "text"}` → `{"session_id", "sanitized_text", "tokens_created"}`. |
 | `POST /v1/hydrate` | `{"session_id", "text"}` → `{"session_id", "hydrated_text"}`. |
 | `GET /v1/vault/{session_id}` | `{"session_id", "count", "tokens"}` with each token's entity type and creation time. Plaintext is included only with `?include_plaintext=true`. |
@@ -224,7 +240,7 @@ The app builds its NER hook in `build_ner()` in `src/ner.py`.
 | `src/hydrator.py` | `StreamHydrator`: a lookahead buffer (tokens up to 32 characters) that holds back a possible partial token until it can be resolved or ruled out. `ChatStreamHydrator` keeps one buffer per choice and per tool call and flushes on `finish_reason`; `GeminiStreamHydrator` keeps one per candidate for answer and thought text, hydrates `functionCall.args`, and preserves part order. |
 | `src/tool_interceptor.py` | JSON-aware hydration of `tool_calls[].function.arguments`. |
 | `src/openai_adapter.py` | Chat-completions session seed, response hydration, and mock upstream. |
-| `src/gemini_adapter.py` | Gemini request scrubbing (`systemInstruction`, `contents[].parts[]` text, `functionCall.args`, `functionResponse.response`), header forwarding, response hydration, and mock upstream. |
+| `src/gemini_adapter.py` | Gemini request scrubbing (`systemInstruction`, `contents[].parts[]` text, `functionCall.args`, `functionResponse.response`, including inside the Code Assist `request` envelope), header forwarding, response hydration, and mock upstream. |
 | `src/main.py` | FastAPI routes and upstream forwarding with `httpx`. |
 
 ## Security notes and limitations
@@ -233,7 +249,7 @@ The app builds its NER hook in `build_ner()` in `src/ner.py`.
 - **Port 8000 has no authentication.** Anyone who can reach it can send requests through your upstream key (if `UPSTREAM_API_KEY` is set), read vault plaintext with `?include_plaintext=true`, or recover values through `/v1/hydrate`. Keep it on localhost or a trusted network.
 - **Detection is best-effort.** Regexes only catch known formats, and the NER model can miss entities: names written in lowercase, lone surnames, single-word names inside parentheses (`(Liam)`), or anything below `NER_THRESHOLD`. Secrets in prose without a field name ("my password is hunter2") are not detected. Treat the proxy as a strong safety net, not a guarantee.
 - **Only message text is scanned.** Image and file inputs, tool definitions, and other request fields are forwarded as-is.
-- **Only chat completions and Gemini `generateContent`/`streamGenerateContent`/`countTokens` are proxied.** Embeddings, the Responses API, and other endpoints are not supported.
+- **Only chat completions, Gemini `generateContent`/`streamGenerateContent`/`countTokens`, and Code Assist `/v1internal` are proxied.** Embeddings, the Responses API, and other endpoints are not supported.
 - **Vault entries are never deleted.** The database grows with each new value; delete the file to reset all sessions.
 
 ## Development
