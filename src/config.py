@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -12,6 +13,11 @@ class Settings(BaseModel):
     DB_PATH: str = "/data/vault.db"
     MOCK_UPSTREAM: bool = False
     UPSTREAM_TIMEOUT_SECONDS: float = 600.0
+    NER_BACKEND: Literal["none", "gliner"] = "none"
+    NER_MODEL: str = "urchade/gliner_multi_pii-v1"
+    NER_LABELS: str = "person:PERSON,school:SCHOOL,university:SCHOOL"
+    NER_THRESHOLD: float = 0.5
+    NER_IGNORE: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":

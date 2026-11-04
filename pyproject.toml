@@ -15,6 +15,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local NER for people, schools, etc. Install a CPU-only torch first to avoid multi-GB CUDA wheels:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+ner = [
+    "gliner>=0.2.30",
+    "sentencepiece>=0.2",
+    "protobuf>=5",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",

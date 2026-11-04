@@ -10,9 +10,11 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from .config import DEFAULT_HMAC_SECRET, Settings
 from .hydrator import ChatStreamHydrator, hydrate_sse_stream
+from .ner import build_ner
 from .sanitizer import Sanitizer
 from .tool_interceptor import hydrate_tool_calls
 from .vault import TOKEN_RE, PIIVault
@@ -127,10 +129,11 @@ def create_app(settings: Settings | None = None, http_client: httpx.AsyncClient 
     async def lifespan(app: FastAPI):
         if settings.VAULT_HMAC_SECRET == DEFAULT_HMAC_SECRET:
             logger.warning("VAULT_HMAC_SECRET is the built-in default; set a unique secret in production.")
+        ner = build_ner(settings)
         vault = PIIVault(settings.DB_PATH, settings.VAULT_HMAC_SECRET)
         client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(settings.UPSTREAM_TIMEOUT_SECONDS, connect=10.0))
         app.state.vault = vault
-        app.state.sanitizer = Sanitizer(vault)
+        app.state.sanitizer = Sanitizer(vault, ner=ner)
         app.state.http_client = client
         try:
             yield
@@ -160,7 +163,8 @@ def create_app(settings: Settings | None = None, http_client: httpx.AsyncClient 
 
         vault: PIIVault = request.app.state.vault
         session_id = derive_session_id(request, payload)
-        sanitized = request.app.state.sanitizer.sanitize_payload(session_id, payload)
+        # NER is CPU-bound; keep it off the event loop so concurrent streams stay responsive.
+        sanitized = await run_in_threadpool(request.app.state.sanitizer.sanitize_payload, session_id, payload)
         stream = bool(payload.get("stream"))
         session_header = {"X-Session-ID": session_id}
         sse_headers = {**session_header, "Cache-Control": "no-cache"}

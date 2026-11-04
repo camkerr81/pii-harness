@@ -1,6 +1,10 @@
 services:
   pii-harness:
-    build: .
+    build:
+      context: .
+      args:
+        NER_BACKEND: ${NER_BACKEND:-gliner}
+        NER_MODEL: ${NER_MODEL:-urchade/gliner_multi_pii-v1}
     image: pii-harness:latest
     container_name: pii-harness
     ports:
@@ -11,6 +15,11 @@ services:
       - VAULT_HMAC_SECRET=${VAULT_HMAC_SECRET:-change-me-in-prod-hmac-key}
       - DB_PATH=/data/vault.db
       - MOCK_UPSTREAM=${MOCK_UPSTREAM:-false}
+      - NER_BACKEND=${NER_BACKEND:-gliner}
+      - NER_MODEL=${NER_MODEL:-urchade/gliner_multi_pii-v1}
+      - NER_LABELS=${NER_LABELS:-person:PERSON,school:SCHOOL,university:SCHOOL}
+      - NER_THRESHOLD=${NER_THRESHOLD:-0.5}
+      - NER_IGNORE=${NER_IGNORE:-}
     volumes:
       # Must be writable by UID 1000 (the container's non-root "harness" user).
       - ./data:/data

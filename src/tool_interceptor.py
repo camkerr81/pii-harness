@@ -1,9 +1,8 @@
-"""Tool-call boundary: JSON-aware handling of ``function.arguments`` in both directions.
+"""Tool-call boundary: JSON-aware hydration of ``function.arguments`` (LLM -> local tools).
 
-Ingress (LLM -> local tools): ``hydrate_json_arguments`` swaps semantic tokens for plaintext.
-Egress (local history -> LLM): ``sanitize_json_arguments`` swaps plaintext for semantic tokens.
-Both parse the arguments and edit string values, so plaintext containing quotes, backslashes,
-or newlines can never break the JSON structure.
+Arguments are parsed and only string values are edited, so plaintext containing quotes,
+backslashes, or newlines can never break the JSON structure. The egress direction lives in
+``Sanitizer.sanitize_json_arguments``.
 """
 
 import copy
@@ -36,14 +35,6 @@ def hydrate_json_arguments(session_id: str, raw_json_str: str, vault: PIIVault) 
             raw_json_str,
         )
     return json.dumps(map_json_strings(data, lambda s: vault.resolve_text(session_id, s)), ensure_ascii=False)
-
-
-def sanitize_json_arguments(raw_json_str: str, scrub: Callable[[str], str]) -> str:
-    try:
-        data = json.loads(raw_json_str)
-    except ValueError:
-        return scrub(raw_json_str)  # tokens contain no JSON metacharacters, so this cannot break quoting
-    return json.dumps(map_json_strings(data, scrub), ensure_ascii=False)
 
 
 def hydrate_tool_calls(session_id: str, tool_calls: list[dict], vault: PIIVault) -> list[dict]:
