@@ -1,0 +1,17 @@
+services:
+  pii-harness:
+    build: .
+    image: pii-harness:latest
+    container_name: pii-harness
+    ports:
+      - "8000:8000"
+    environment:
+      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://api.openai.com/v1}
+      - UPSTREAM_API_KEY=${UPSTREAM_API_KEY:-}
+      - VAULT_HMAC_SECRET=${VAULT_HMAC_SECRET:-change-me-in-prod-hmac-key}
+      - DB_PATH=/data/vault.db
+      - MOCK_UPSTREAM=${MOCK_UPSTREAM:-false}
+    volumes:
+      # Must be writable by UID 1000 (the container's non-root "harness" user).
+      - ./data:/data
+    restart: unless-stopped
