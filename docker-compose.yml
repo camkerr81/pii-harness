@@ -10,9 +10,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://api.openai.com/v1}
+      - UPSTREAM_OPENAI_URL=${UPSTREAM_OPENAI_URL:-${UPSTREAM_BASE_URL:-https://api.openai.com/v1}}
       - UPSTREAM_API_KEY=${UPSTREAM_API_KEY:-}
+      - UPSTREAM_GEMINI_URL=${UPSTREAM_GEMINI_URL:-https://generativelanguage.googleapis.com}
       - VAULT_HMAC_SECRET=${VAULT_HMAC_SECRET:-change-me-in-prod-hmac-key}
+      - CUSTOM_REDACT_TERMS=${CUSTOM_REDACT_TERMS:-}
+      - VAULT_FALLBACK_SESSION=${VAULT_FALLBACK_SESSION:-}
       - DB_PATH=/data/vault.db
       - MOCK_UPSTREAM=${MOCK_UPSTREAM:-false}
       - NER_BACKEND=${NER_BACKEND:-gliner}

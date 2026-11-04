@@ -34,7 +34,7 @@ def hydrate_json_arguments(session_id: str, raw_json_str: str, vault: PIIVault) 
             lambda m: json.dumps(vault.resolve_token(session_id, m.group()), ensure_ascii=False)[1:-1],
             raw_json_str,
         )
-    return json.dumps(map_json_strings(data, lambda s: vault.resolve_text(session_id, s)), ensure_ascii=False)
+    return json.dumps(map_json_strings(data, lambda s: vault.hydrate_text(session_id, s)), ensure_ascii=False)
 
 
 def hydrate_tool_calls(session_id: str, tool_calls: list[dict], vault: PIIVault) -> list[dict]:

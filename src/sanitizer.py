@@ -25,6 +25,11 @@ def _phone_digits_ok(value: str) -> bool:
     return 8 <= sum(c.isdigit() for c in value) <= 15
 
 
+def _not_local_ip(value: str) -> bool:
+    """Loopback and wildcard addresses stay readable so local dev URLs keep working."""
+    return not value.startswith("127.") and value != "0.0.0.0"
+
+
 # (entity_type, pattern, optional validator). When a pattern has a group named "v", only that group is
 # replaced (e.g. the password in "password=hunter2"). Overlaps resolve to the earliest match; at the
 # same start the earlier detector in this list wins, then the longer match.
@@ -81,7 +86,7 @@ DETECTORS: list[tuple[str, re.Pattern[str], Callable[[str], bool] | None]] = [
         ),
         None,
     ),
-    ("IPV4", re.compile(rf"(?<![\d.])(?:{_OCTET}\.){{3}}{_OCTET}(?!\d|\.\d)"), None),
+    ("IPV4", re.compile(rf"(?<![\d.])(?:{_OCTET}\.){{3}}{_OCTET}(?!\d|\.\d)"), _not_local_ip),
     (
         "PHONE",
         re.compile(
@@ -109,9 +114,20 @@ def extract_unstructured_entities(text: str) -> list[tuple[str, str]]:
 
 
 class Sanitizer:
-    def __init__(self, vault: PIIVault, ner: Callable[[str], list[tuple[str, str]]] = extract_unstructured_entities):
+    def __init__(
+        self,
+        vault: PIIVault,
+        ner: Callable[[str], list[tuple[str, str]]] = extract_unstructured_entities,
+        custom_terms: list[str] = (),
+    ):
         self.vault = vault
         self.ner = ner
+        # Site-specific names, domains, and hostnames (CUSTOM_REDACT_TERMS), matched case-insensitively
+        # as whole words. Longest first, so "db.corp.example" wins over "corp.example".
+        terms = sorted({t.strip() for t in custom_terms if t.strip()}, key=len, reverse=True)
+        self.custom_re = (
+            re.compile(r"(?i)(?<!\w)(?:" + "|".join(map(re.escape, terms)) + r")(?!\w)") if terms else None
+        )
 
     def find_entities(self, text: str) -> list[tuple[int, int, str]]:
         """Non-overlapping ``(start, end, entity_type)`` spans."""
@@ -121,11 +137,16 @@ class Sanitizer:
                 start, end = m.span("v") if "v" in pattern.groupindex else m.span()
                 if end > start and not TOKEN_RE.fullmatch(text, start, end) and (validator is None or validator(m.group())):
                     candidates.append((start, priority, start - end, entity_type))
+        # Custom terms and NER rank after the detectors, so at the same start a structured match such as
+        # a whole email address wins over a custom term or name that is only its local part.
+        if self.custom_re:
+            for m in self.custom_re.finditer(text):
+                candidates.append((m.start(), len(DETECTORS), m.start() - m.end(), "CUSTOM"))
         for entity_type, value in self.ner(text):
             if value.strip():
                 # Whole-word occurrences only, so "Jane" never matches inside "Janet".
                 for m in re.finditer(rf"(?<!\w){re.escape(value)}(?!\w)", text):
-                    candidates.append((m.start(), len(DETECTORS), m.start() - m.end(), entity_type))
+                    candidates.append((m.start(), len(DETECTORS) + 1, m.start() - m.end(), entity_type))
         spans: list[tuple[int, int, str]] = []
         last_end = 0
         for start, _, neg_len, entity_type in sorted(candidates):

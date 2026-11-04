@@ -75,6 +75,7 @@ def test_detects_sensitive_values(sanitizer, text, value, entity_type):
         "password = getpass.getpass(); token = os.environ['TOKEN']; secret = None",
         "password: ${DB_PASSWORD}  # the password is required",
         "input_tokens: 20, token_count = 5",
+        "serve on http://127.0.0.1:8000 or 0.0.0.0:3000, loopback 127.10.0.1",
     ],
 )
 def test_ignores_lookalikes(sanitizer, text):
@@ -86,6 +87,16 @@ def test_ner_hook_entities_are_tokenised_as_whole_words(sanitizer):
     assert sanitizer.sanitize_text("s1", "Jane emailed jane@example.com; ask Jane, not Janet") == (
         "<<PERSON_01>> emailed <<EMAIL_01>>; ask <<PERSON_01>>, not Janet"
     )
+
+
+def test_custom_terms_are_case_insensitive_whole_words(sanitizer):
+    sanitizer = Sanitizer(sanitizer.vault, custom_terms=["corp.example", " nas01.corp.example", "Project Falcon", ""])
+    assert sanitizer.sanitize_text("s1", "nas01.corp.example and www.corp.example host project falcon; corp.examples") == (
+        "<<CUSTOM_01>> and www.<<CUSTOM_02>> host <<CUSTOM_03>>; corp.examples"
+    )
+    # A structured match starting at the same place wins, so the address is not split.
+    custom = Sanitizer(sanitizer.vault, custom_terms=["jane"])
+    assert custom.sanitize_text("s2", "jane@corp.io or Jane") == "<<EMAIL_01>> or <<CUSTOM_01>>"
 
 
 def test_json_values_under_secret_keys_are_tokenised(sanitizer):

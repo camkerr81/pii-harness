@@ -68,7 +68,7 @@ class FakeUpstream:
 
 
 def make_client(upstream=None, **overrides):
-    settings = Settings(DB_PATH=":memory:", VAULT_HMAC_SECRET="test-secret", UPSTREAM_BASE_URL="http://upstream.test/v1/", **overrides)
+    settings = Settings(DB_PATH=":memory:", VAULT_HMAC_SECRET="test-secret", UPSTREAM_OPENAI_URL="http://upstream.test/v1/", **overrides)
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream)) if upstream else None
     return TestClient(create_app(settings, http_client=http_client))
 

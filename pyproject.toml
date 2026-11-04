@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pii-harness"
-version = "0.1.0"
-description = "Zero-trust semantic tokenization proxy for OpenAI-compatible chat completion APIs"
+version = "0.2.0"
+description = "Zero-trust semantic tokenization proxy for OpenAI-compatible and Gemini LLM APIs"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

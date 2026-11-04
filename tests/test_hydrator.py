@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from src.hydrator import ChatStreamHydrator, StreamHydrator
+from src.hydrator import ChatStreamHydrator, GeminiStreamHydrator, StreamHydrator
 from src.sanitizer import Sanitizer
 from src.tool_interceptor import hydrate_json_arguments
 from src.vault import PIIVault
@@ -145,3 +145,33 @@ def test_chat_stream_finish_emits_leftovers_when_stream_is_cut(vault):
     tail = h.finish()
     assert collect([first, tail]) == ("a <<IPV4_0", "")
     assert tail["id"] == "c"
+
+
+def gemini_event(*parts, finish=None):
+    candidate = {"content": {"role": "model", "parts": list(parts)}, "index": 0}
+    if finish:
+        candidate["finishReason"] = finish
+    return {"candidates": [candidate]}
+
+
+def test_gemini_stream_keeps_part_order_and_hydrates_function_calls(vault):
+    vault.get_or_create_token(SESSION, "IPV4", "10.0.0.1")
+    vault.get_or_create_token(SESSION, "EMAIL", "admin@example.com")
+    h = GeminiStreamHydrator(vault, SESSION)
+    events = [
+        gemini_event({"text": "Checking <<IP", "thought": True}),
+        gemini_event({"text": "V4_01>>.", "thought": True}),
+        gemini_event({"text": "Mail <<EMAIL_0"}),
+        gemini_event({"text": "1>> and <"}),
+        gemini_event({"functionCall": {"name": "ssh", "args": {"cmd": "ssh root@<<IPV4_01>>", "to": ["<<EMAIL_01>>"]}}}),
+        gemini_event({"text": " bye <<IPV4_0"}, finish="STOP"),
+    ]
+    parts = [p for e in events for p in h.process_event(e)["candidates"][0]["content"]["parts"]]
+    assert h.finish() is None
+    assert "".join(p["text"] for p in parts if p.get("thought")) == "Checking 10.0.0.1."
+    call_at = next(i for i, p in enumerate(parts) if "functionCall" in p)
+    # Text held back before the tool call is released in front of it, not after.
+    assert parts[call_at - 1] == {"text": "<"}
+    assert parts[call_at]["functionCall"]["args"] == {"cmd": "ssh root@10.0.0.1", "to": ["admin@example.com"]}
+    answer = "".join(p["text"] for p in parts if "text" in p and not p.get("thought"))
+    assert answer == "Mail admin@example.com and < bye <<IPV4_0"

@@ -35,6 +35,17 @@ def test_unknown_token_resolves_to_itself(vault):
     assert vault.resolve_token("s1", "<<EMAIL_07>>") == "<<EMAIL_07>>"
 
 
+def test_fallback_session_resolves_tokens_missing_from_the_session():
+    v = PIIVault(":memory:", "test-secret", fallback_session="global")
+    v.get_or_create_token("global", "EMAIL", "shared@example.com")
+    v.get_or_create_token("global", "IPV4", "10.9.9.9")
+    v.get_or_create_token("s1", "EMAIL", "own@example.com")
+    # The session's own token wins; only tokens it lacks fall back to "global".
+    assert v.hydrate_text("s1", "<<EMAIL_01>> <<IPV4_01>> <<IPV4_02>>") == "own@example.com 10.9.9.9 <<IPV4_02>>"
+    assert PIIVault(":memory:", "test-secret").hydrate_text("s1", "<<IPV4_01>>") == "<<IPV4_01>>"
+    v.close()
+
+
 def test_entity_type_is_normalised_into_token_format(vault):
     assert vault.get_or_create_token("s1", "person name", "Jane Doe") == "<<PERSON_NAME_01>>"
 

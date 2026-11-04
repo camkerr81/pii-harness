@@ -1,6 +1,6 @@
 # pii-harness
 
-A local, zero-trust proxy that sits between your AI agents or tools and an OpenAI-compatible LLM API. It removes personal data (names, schools, emails, phone numbers), credentials, and infrastructure IPs from everything you send to the model, and puts the real values back into what the model returns.
+A local, zero-trust proxy that sits between your AI agents or tools and an LLM API: OpenAI-compatible chat completions or Google's native Gemini API (as used by the Antigravity `agy` CLI). It removes personal data (names, schools, emails, phone numbers), credentials, and infrastructure IPs from everything you send to the model, and puts the real values back into what the model returns.
 
 ```text
  agent / tool                 pii-harness (local)                    frontier LLM
@@ -24,6 +24,9 @@ The model only ever sees readable placeholders such as `<<PERSON_01>>`, `<<SCHOO
 - **Local NER for names and schools.** A bundled [GLiNER](https://github.com/urchade/GLiNER) model finds people, schools, and any other entity types you configure. It runs on CPU inside the container with the model baked into the image, so no text leaves the machine for detection.
 - **Session isolation.** Tokens are numbered per session and only resolve within the session that created them.
 - **Persistent vault.** SQLite in WAL mode with HMAC-SHA256 lookup keys, stored on a mounted volume.
+- **Native Gemini API.** Serves `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`, so the `agy` CLI can be pointed at it with `GOOGLE_GEMINI_BASE_URL`. Tool output (`functionResponse`) is tokenised before it reaches Google, and `functionCall` arguments are hydrated before `agy` runs them.
+- **Bridge endpoints.** `POST /v1/sanitize` and `POST /v1/hydrate` let a wrapper script tokenise and restore plain text directly.
+- **Custom terms.** `CUSTOM_REDACT_TERMS` redacts your own hostnames, domains, project names, or people as `<<CUSTOM_NN>>`.
 - **Offline mock mode.** A built-in fake upstream for trying the proxy without an API key.
 
 ### What gets detected
@@ -34,7 +37,8 @@ The model only ever sees readable placeholders such as `<<PERSON_01>>`, `<<SCHOO
 | `SCHOOL` | NER | `Northmead Public School`, `James Ruse Agricultural High School`, `University of Sydney` |
 | `EMAIL` | regex | `jane.doe@corp.example`, `ops+alerts@mail.example.com` |
 | `PHONE` | regex | `+61 412 345 678`, `0412 345 678`, `(02) 9876 5432`, `03-9876-5432`, `1300 123 456`, `+44 20 7946 0958`, `(415) 555-0132` |
-| `IPV4` | regex | `10.0.0.5`, `192.168.1.254` (octets are validated, so `999.1.1.1` is ignored) |
+| `IPV4` | regex | `10.0.0.5`, `192.168.1.254` (octets are validated, so `999.1.1.1` is ignored; loopback `127.x.x.x` and `0.0.0.0` stay readable so local URLs keep working) |
+| `CUSTOM` | `CUSTOM_REDACT_TERMS` | Whatever you list, matched case-insensitively as whole words: `nas01.home.lan`, `corp.example`, `Project Falcon` |
 | `API_KEY` | regex | OpenAI/Anthropic `sk-…`, GitHub `ghp_…` / `github_pat_…`, GitLab `glpat-…`, Slack `xoxb-…` / `xapp-…`, AWS `AKIA…`, Google `AIza…`, Stripe `sk_live_…`, Hugging Face `hf_…`, npm `npm_…`, SendGrid `SG.…` |
 | `CREDENTIAL` | regex | The value of any secret-named field: `DB_PASSWORD=hunter2`, `"client_secret": "…"`, `aws_secret_access_key = …`, `SECRET_KEY='…'`; passwords in URLs (`postgres://app:pa55word@db/app`); `Authorization: Bearer …` / `Basic …` |
 | `JWT` | regex | `eyJhbGciOi….eyJzdWIi….signature` |
@@ -72,8 +76,11 @@ Set these in `.env` (read by Docker Compose) or as environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL. Requests go to `{UPSTREAM_BASE_URL}/chat/completions`. |
-| `UPSTREAM_API_KEY` | _(empty)_ | If set, the proxy uses this key upstream. If empty, it forwards each client's own `Authorization: Bearer …` header. |
+| `UPSTREAM_OPENAI_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL. Requests go to `{UPSTREAM_OPENAI_URL}/chat/completions`. The old name `UPSTREAM_BASE_URL` is still read if this is unset. |
+| `UPSTREAM_API_KEY` | _(empty)_ | OpenAI route only. If set, the proxy uses this key upstream. If empty, it forwards each client's own `Authorization: Bearer …` header. |
+| `UPSTREAM_GEMINI_URL` | `https://generativelanguage.googleapis.com` | Gemini API host. Requests keep their path and query, e.g. `{UPSTREAM_GEMINI_URL}/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse`. |
+| `CUSTOM_REDACT_TERMS` | _(empty)_ | Comma-separated terms always replaced with `<<CUSTOM_NN>>`. |
+| `VAULT_FALLBACK_SESSION` | _(empty)_ | If set (e.g. `global`), tokens a session doesn't know are looked up in this session too. Lets a bridge script create tokens once with `/v1/sanitize` in `global` and have them hydrate everywhere. |
 | `VAULT_HMAC_SECRET` | `change-me-in-prod-hmac-key` | Secret for the HMAC-SHA256 vault keys. **Change it.** The proxy logs a warning while the default is in use. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `DB_PATH` | `/data/vault.db` | SQLite vault location. Use `:memory:` for a throwaway vault. |
 | `MOCK_UPSTREAM` | `false` | `true` answers from the built-in offline mock instead of calling upstream. |
@@ -122,11 +129,39 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Email ops@example.com about 10.0.0.5"}]}'
 ```
 
+### Antigravity CLI (`agy`)
+
+`agy` sends its traffic through the proxy when it uses a Gemini API key, the documented bring-your-own-key mode:
+
+```bash
+export GEMINI_API_KEY=AIza...                         # your Gemini API key (forwarded to Google untouched)
+export GOOGLE_GEMINI_BASE_URL=http://localhost:8000   # or http://pii-harness:8000 from another container
+agy --settings '{"modelProvider":"gemini"}'
+```
+
+To make it permanent, put `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` or add a shell alias. Verified with `agy` 1.5.0: the conversation-title request, the main agent requests, and command output sent back as `functionResponse` all reach Google tokenised, while the commands `agy` runs locally use the real values.
+
+`agy` reads `GOOGLE_GEMINI_BASE_URL` only in API-key mode. When it is signed in with a Google account (for example a Google AI Pro subscription), it talks to Google's own Antigravity backend and does not go through the proxy. The Antigravity desktop app and IDE extension cannot be pointed at a custom endpoint either.
+
+The Gemini route forwards the client's `Authorization`, `x-goog-api-key`, `x-goog-user-project`, and `x-goog-api-client` headers and the query string (`?alt=sse`, `?key=…`) unchanged; other headers are dropped. It refuses other Gemini methods (`embedContent`, …) with a 404 rather than forwarding them unscrubbed.
+
+### Bridge scripts
+
+```bash
+curl -s localhost:8000/v1/sanitize -H 'Content-Type: application/json' \
+  -d '{"session_id": "job-42", "text": "ssh root@10.0.0.5"}'
+# {"session_id":"job-42","sanitized_text":"ssh root@<<IPV4_01>>","tokens_created":1}
+
+curl -s localhost:8000/v1/hydrate -H 'Content-Type: application/json' \
+  -d '{"session_id": "job-42", "text": "Connected to <<IPV4_01>>"}'
+# {"session_id":"job-42","hydrated_text":"Connected to 10.0.0.5"}
+```
+
 ### Sessions
 
 The `X-Session-ID` request header selects the vault session. Use one ID per conversation or agent so token numbering stays stable across turns.
 
-If the header is missing, the proxy derives a session ID from a hash of the first system, developer, or user message (`auto-<16 hex chars>`), so repeated requests for the same conversation land in the same session. If there are no messages it uses `default_session`. Every response includes the session it used in an `X-Session-ID` header.
+If the header is missing, the proxy derives a session ID from a hash of the first system, developer, or user message, or the Gemini `systemInstruction` (`auto-<16 hex chars>`), so repeated requests for the same conversation land in the same session. If there are no messages it uses `default_session`. Every response includes the session it used in an `X-Session-ID` header.
 
 ### Tool calls
 
@@ -140,10 +175,13 @@ The proxy does not run tools itself. Your client does, as usual:
 | Endpoint | Description |
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions, with `stream: true` (SSE) or `stream: false`. Upstream error responses are passed through with their original status code. |
-| `GET /v1/vault/{session_id}` | Tokens stored for a session, with entity type and creation time. Plaintext is deliberately not returned. |
+| `POST /{v1,v1beta,v1alpha}/models/{model}:{generateContent,streamGenerateContent,countTokens}` | Native Gemini API, streamed (`?alt=sse` or JSON array) or not. Upstream errors pass through unchanged. |
+| `POST /v1/sanitize` | `{"session_id", "text"}` → `{"session_id", "sanitized_text", "tokens_created"}`. |
+| `POST /v1/hydrate` | `{"session_id", "text"}` → `{"session_id", "hydrated_text"}`. |
+| `GET /v1/vault/{session_id}` | `{"session_id", "count", "tokens"}` with each token's entity type and creation time. Plaintext is included only with `?include_plaintext=true`. |
 | `GET /health` | `{"status": "ok", "db_path": "…"}`. Used by the container `HEALTHCHECK`. |
 
-Only `Content-Type` and `Authorization` are forwarded upstream; other client headers are dropped.
+The OpenAI route forwards only `Content-Type` and `Authorization`; the Gemini route's forwarded headers are listed under [Antigravity CLI](#antigravity-cli-agy). Other client headers are dropped.
 
 ## Names, schools, and other entities
 
@@ -183,17 +221,19 @@ The app builds its NER hook in `build_ner()` in `src/ner.py`.
 | `src/vault.py` | `PIIVault`: SQLite store keyed by `(session_id, HMAC-SHA256(plaintext))`. `get_or_create_token` returns the existing token or allocates the next `<<TYPE_NN>>` for that session and type; `resolve_token` maps back, returning unknown tokens unchanged. |
 | `src/sanitizer.py` | Regex detectors plus the NER hook. Overlapping matches resolve to the earliest; at the same position the more specific detector wins (an API key beats a generic credential, a URL password beats an email). Walks every text-bearing field of the request messages, and treats values under secret-named JSON keys as credentials. |
 | `src/ner.py` | GLiNER loading, label mapping, text chunking, false-positive filtering, and result caching. |
-| `src/hydrator.py` | `StreamHydrator`: a lookahead buffer (tokens up to 32 characters) that holds back a possible partial token until it can be resolved or ruled out. `ChatStreamHydrator` keeps one buffer per choice and per tool call and flushes on `finish_reason`. |
+| `src/hydrator.py` | `StreamHydrator`: a lookahead buffer (tokens up to 32 characters) that holds back a possible partial token until it can be resolved or ruled out. `ChatStreamHydrator` keeps one buffer per choice and per tool call and flushes on `finish_reason`; `GeminiStreamHydrator` keeps one per candidate for answer and thought text, hydrates `functionCall.args`, and preserves part order. |
 | `src/tool_interceptor.py` | JSON-aware hydration of `tool_calls[].function.arguments`. |
-| `src/main.py` | FastAPI app, upstream forwarding with `httpx`, and the mock upstream. |
+| `src/openai_adapter.py` | Chat-completions session seed, response hydration, and mock upstream. |
+| `src/gemini_adapter.py` | Gemini request scrubbing (`systemInstruction`, `contents[].parts[]` text, `functionCall.args`, `functionResponse.response`), header forwarding, response hydration, and mock upstream. |
+| `src/main.py` | FastAPI routes and upstream forwarding with `httpx`. |
 
 ## Security notes and limitations
 
 - **The vault holds plaintext.** HMAC is used for lookups, not encryption, so `data/vault.db` contains every value it has seen. Protect it like a secret store, and don't commit or share it.
-- **Port 8000 has no authentication.** Anyone who can reach it can send requests through your upstream key (if `UPSTREAM_API_KEY` is set) and list token metadata. Keep it on localhost or a trusted network.
+- **Port 8000 has no authentication.** Anyone who can reach it can send requests through your upstream key (if `UPSTREAM_API_KEY` is set), read vault plaintext with `?include_plaintext=true`, or recover values through `/v1/hydrate`. Keep it on localhost or a trusted network.
 - **Detection is best-effort.** Regexes only catch known formats, and the NER model can miss entities: names written in lowercase, lone surnames, single-word names inside parentheses (`(Liam)`), or anything below `NER_THRESHOLD`. Secrets in prose without a field name ("my password is hunter2") are not detected. Treat the proxy as a strong safety net, not a guarantee.
-- **Only message text is scanned.** Image inputs, tool definitions, and other request fields are forwarded as-is.
-- **Only `/v1/chat/completions` is proxied.** Embeddings, the Responses API, and other endpoints are not supported.
+- **Only message text is scanned.** Image and file inputs, tool definitions, and other request fields are forwarded as-is.
+- **Only chat completions and Gemini `generateContent`/`streamGenerateContent`/`countTokens` are proxied.** Embeddings, the Responses API, and other endpoints are not supported.
 - **Vault entries are never deleted.** The database grows with each new value; delete the file to reset all sessions.
 
 ## Development
@@ -220,4 +260,4 @@ Run locally without Docker:
 DB_PATH=./data/vault.db MOCK_UPSTREAM=true uvicorn src.main:app --reload
 ```
 
-The test suite covers deterministic token reuse, every detector (including code that must not be redacted), NER chunking and false-positive filtering, tokens split across arbitrary chunk boundaries (fixed, random, and exhaustive splits), JSON safety of hydrated tool arguments, and an end-to-end check that the upstream request contains none of the original sensitive values.
+The test suite covers deterministic token reuse, every detector (including code that must not be redacted), NER chunking and false-positive filtering, tokens split across arbitrary chunk boundaries (fixed, random, and exhaustive splits), JSON safety of hydrated tool arguments, the bridge endpoints, and end-to-end checks for both the OpenAI and Gemini (`agy`) routes that the upstream request contains none of the original sensitive values.

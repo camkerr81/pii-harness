@@ -25,10 +25,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_session_token ON vault (session_id, 
 class PIIVault:
     """Session-scoped, bidirectional plaintext <-> semantic token store backed by SQLite."""
 
-    def __init__(self, db_path: str, hmac_secret: str):
+    def __init__(self, db_path: str, hmac_secret: str, fallback_session: str = ""):
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._secret = hmac_secret.encode()
+        # Tokens not found in the request's session are looked up here (e.g. "global" tokens
+        # created through /v1/sanitize by a bridge script). Empty disables the fallback.
+        self.fallback_session = fallback_session
         self._lock = threading.Lock()
         # Autocommit mode; writes use explicit BEGIN IMMEDIATE so token numbering stays
         # consistent even if several processes share the same database file.
@@ -75,21 +78,29 @@ class PIIVault:
                 raise
 
     def resolve_token(self, session_id: str, token: str) -> str:
+        sessions = (session_id, self.fallback_session) if self.fallback_session not in ("", session_id) else (session_id,)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT plaintext FROM vault WHERE session_id = ? AND token = ?", (session_id, token)
-            ).fetchone()
-        return row[0] if row else token
+            for session in sessions:
+                row = self._conn.execute(
+                    "SELECT plaintext FROM vault WHERE session_id = ? AND token = ?", (session, token)
+                ).fetchone()
+                if row:
+                    return row[0]
+        return token
 
-    def resolve_text(self, session_id: str, text: str) -> str:
+    def hydrate_text(self, session_id: str, text: str) -> str:
         """Replace every semantic token in ``text`` with its plaintext for ``session_id``."""
         return TOKEN_RE.sub(lambda m: self.resolve_token(session_id, m.group()), text)
 
-    def list_tokens(self, session_id: str) -> list[dict]:
-        """Token metadata for a session. Plaintext is deliberately not included."""
+    def list_tokens(self, session_id: str, include_plaintext: bool = False) -> list[dict]:
+        """Token metadata for a session; plaintext only when explicitly requested."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT token, entity_type, created_at FROM vault WHERE session_id = ? ORDER BY rowid",
+                "SELECT token, entity_type, created_at, plaintext FROM vault WHERE session_id = ? ORDER BY rowid",
                 (session_id,),
             ).fetchall()
-        return [{"token": t, "entity_type": e, "created_at": c} for t, e, c in rows]
+        entries = [{"token": t, "entity_type": e, "created_at": c} for t, e, c, _ in rows]
+        if include_plaintext:
+            for entry, row in zip(entries, rows):
+                entry["plaintext"] = row[3]
+        return entries
